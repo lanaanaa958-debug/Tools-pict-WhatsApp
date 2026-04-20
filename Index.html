@@ -1,0 +1,393 @@
+[WhatsApp] → (mengunduh file view once ke cache) → [FileObserver] mendeteksi file baru
+       ↓                                                         ↓
+[NotificationListener] mendeteksi notifikasi "Foto/Video sekali lihat"
+       ↓                                                         ↓
+       └─────────────────────→ [RecoveryService] ←───────────────┘
+                                      ↓
+                           Salin file ke folder aman (Documents/RecoveredMedia)
+app/
+├── src/main/java/com/example/mediarecovery/
+│   ├── MainActivity.kt
+│   ├── RecoveryService.kt
+│   ├── NotificationListener.kt
+│   ├── FileObserverHelper.kt
+│   └── utils/FileUtils.kt
+├── src/main/res/xml/notification_listener_service.xml
+└── src/main/AndroidManifest.xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.mediarecovery">
+
+    <!-- Izin untuk mengakses penyimpanan eksternal (Android 10 ke bawah) -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- Izin untuk akses penuh ke semua file (Android 11+, diperlukan untuk memindai cache aplikasi lain) -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- Izin untuk menerima notifikasi -->
+    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
+
+    <!-- Izin untuk menjalankan service latar belakang -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Media Cache Recovery"
+        android:requestLegacyExternalStorage="true"
+        android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+
+        <activity android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Notification Listener Service -->
+        <service
+            android:name=".NotificationListener"
+            android:label="Media Recovery Listener"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Background Service untuk FileObserver -->
+        <service android:name=".RecoveryService"
+            android:enabled="true"
+            android:exported="false" />
+
+    </application>
+</manifest>
+package com.example.mediarecovery
+
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
+import android.widget.Button
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var btnEnableNotification: Button
+    private lateinit var btnStartService: Button
+    private lateinit var btnRequestStorage: Button
+
+    companion object {
+        private const val REQUEST_CODE_NOTIFICATION = 1001
+        private const val REQUEST_CODE_MANAGE_STORAGE = 1002
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        btnEnableNotification = findViewById(R.id.btnEnableNotification)
+        btnStartService = findViewById(R.id.btnStartService)
+        btnRequestStorage = findViewById(R.id.btnRequestStorage)
+
+        btnEnableNotification.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }
+
+        btnRequestStorage.setOnClickListener {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                intent.data = Uri.parse("package:$packageName")
+                startActivityForResult(intent, REQUEST_CODE_MANAGE_STORAGE)
+            } else {
+                Toast.makeText(this, "Izin sudah diberikan secara otomatis di Android 10 ke bawah", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        btnStartService.setOnClickListener {
+            checkPermissionsAndStart()
+        }
+    }
+
+    private fun checkPermissionsAndStart() {
+        // Cek izin MANAGE_EXTERNAL_STORAGE untuk Android 11+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+            Toast.makeText(this, "Harap berikan izin 'Izinkan akses ke semua file' terlebih dahulu", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        // Cek apakah NotificationListener sudah diaktifkan
+        if (!isNotificationListenerEnabled()) {
+            Toast.makeText(this, "Aktifkan akses notifikasi melalui tombol di atas", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        // Mulai service
+        val intent = Intent(this, RecoveryService::class.java)
+        startService(intent)
+        Toast.makeText(this, "Service pemulihan cache berjalan...", Toast.LENGTH_LONG).show()
+    }
+
+    private fun isNotificationListenerEnabled(): Boolean {
+        val enabledListeners = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+        return enabledListeners?.contains(packageName) == true
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_CODE_MANAGE_STORAGE && resultCode == Activity.RESULT_OK) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) {
+                Toast.makeText(this, "Izin penyimpanan penuh diberikan", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+}
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Media Cache Recovery Tool (Riset)"
+        android:textSize="18sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Langkah-langkah:\n1. Berikan izin akses file\n2. Aktifkan akses notifikasi\n3. Jalankan service" />
+
+    <Button
+        android:id="@+id/btnRequestStorage"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="1. Beri Izin Akses Semua File" />
+
+    <Button
+        android:id="@+id/btnEnableNotification"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="2. Aktifkan Akses Notifikasi" />
+
+    <Button
+        android:id="@+id/btnStartService"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="3. Jalankan Service Recovery" />
+
+</LinearLayout>
+package com.example.mediarecovery
+
+import android.service.notification.NotificationListenerService
+import android.service.notification.StatusBarNotification
+import android.util.Log
+
+class NotificationListener : NotificationListenerService() {
+
+    companion object {
+        const val TAG = "NotifListener"
+        var isViewOnceDetected = false
+    }
+
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        sbn ?: return
+        val packageName = sbn.packageName
+        if (packageName == "com.whatsapp") {
+            val text = sbn.notification.extras.getString(android.app.Notification.EXTRA_TEXT) ?: ""
+            val title = sbn.notification.extras.getString(android.app.Notification.EXTRA_TITLE) ?: ""
+
+            Log.d(TAG, "Notif: $title - $text")
+
+            // Deteksi kata kunci untuk media sekali lihat (bahasa Inggris/Indonesia)
+            if (text.contains("View Once", ignoreCase = true) ||
+                text.contains("Sekali lihat", ignoreCase = true) ||
+                title.contains("View Once", ignoreCase = true)) {
+
+                Log.i(TAG, "⚠️ View Once media detected!")
+                isViewOnceDetected = true
+
+                // Beri sinyal ke RecoveryService untuk segera memindai cache
+                val intent = android.content.Intent(this, RecoveryService::class.java)
+                intent.action = "SCAN_CACHE_NOW"
+                startService(intent)
+            }
+        }
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        // Tidak perlu aksi
+    }
+}
+package com.example.mediarecovery
+
+import android.app.Service
+import android.content.Intent
+import android.os.*
+import android.util.Log
+import java.io.File
+
+class RecoveryService : Service() {
+
+    private lateinit var fileObserver: WhatsAppCacheObserver
+    private var isObserving = false
+
+    companion object {
+        private const val TAG = "RecoveryService"
+        // Folder cache WhatsApp (umum untuk versi terbaru)
+        private val CACHE_PATHS = listOf(
+            "/data/data/com.whatsapp/cache",           // root cache (butuh root)
+            "/storage/emulated/0/Android/data/com.whatsapp/cache", // scoped storage
+            "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/.Statuses" // alternatif
+        )
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == "SCAN_CACHE_NOW") {
+            Log.i(TAG, "Manual scan triggered by notification")
+            scanCacheDirectories()
+        } else if (!isObserving) {
+            startCacheObservation()
+        }
+        return START_STICKY
+    }
+
+    private fun startCacheObservation() {
+        val targetDir = findWritableCacheDir()
+        if (targetDir != null && targetDir.exists()) {
+            fileObserver = WhatsAppCacheObserver(targetDir.absolutePath)
+            fileObserver.startWatching()
+            isObserving = true
+            Log.i(TAG, "FileObserver aktif pada: ${targetDir.absolutePath}")
+        } else {
+            Log.e(TAG, "Tidak dapat menemukan folder cache WhatsApp. Coba scan manual.")
+            // Fallback: scan periodik
+            schedulePeriodicScan()
+        }
+    }
+
+    private fun findWritableCacheDir(): File? {
+        for (path in CACHE_PATHS) {
+            val dir = File(path)
+            if (dir.exists() && dir.canRead()) {
+                // Coba buat file test untuk memastikan bisa baca
+                return dir
+            }
+        }
+        // Alternatif: cari berdasarkan konteks aplikasi (jika kita punya akses root)
+        return null
+    }
+
+    private fun scanCacheDirectories() {
+        Log.d(TAG, "Scanning cache directories...")
+        for (path in CACHE_PATHS) {
+            val dir = File(path)
+            if (dir.exists()) {
+                scanDirectory(dir)
+            }
+        }
+    }
+
+    private fun scanDirectory(dir: File) {
+        dir.listFiles()?.forEach { file ->
+            if (file.isFile && isMediaFile(file)) {
+                val age = System.currentTimeMillis() - file.lastModified()
+                if (age < 30000) { // file baru dalam 30 detik
+                    copyToSafeLocation(file)
+                }
+            }
+        }
+    }
+
+    private fun isMediaFile(file: File): Boolean {
+        val name = file.name.lowercase()
+        return name.endsWith(".jpg") || name.endsWith(".jpeg") ||
+                name.endsWith(".png") || name.endsWith(".mp4") ||
+                name.endsWith(".gif") || name.endsWith(".webp")
+    }
+
+    private fun copyToSafeLocation(source: File) {
+        try {
+            val destDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+                .resolve("RecoveredMedia")
+            if (!destDir.exists()) destDir.mkdirs()
+
+            val timestamp = System.currentTimeMillis()
+            val destFile = File(destDir, "${timestamp}_${source.name}")
+
+            source.copyTo(destFile, overwrite = true)
+            Log.i(TAG, "✅ Media disimpan: ${destFile.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal menyalin file: ${e.message}")
+        }
+    }
+
+    private fun schedulePeriodicScan() {
+        // Gunakan Handler untuk scan setiap 10 detik (sebagai fallback)
+        val handler = Handler(Looper.getMainLooper())
+        val runnable = object : Runnable {
+            override fun run() {
+                scanCacheDirectories()
+                handler.postDelayed(this, 10000)
+            }
+        }
+        handler.post(runnable)
+    }
+
+    inner class WhatsAppCacheObserver(path: String) : FileObserver(path, FileObserver.CREATE or FileObserver.CLOSE_WRITE) {
+        override fun onEvent(event: Int, path: String?) {
+            if (path != null && (event == CREATE || event == CLOSE_WRITE)) {
+                val file = File(this.path, path)
+                if (isMediaFile(file)) {
+                    Log.d(TAG, "File baru terdeteksi: $path")
+                    // Tunggu sebentar agar file selesai ditulis
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        copyToSafeLocation(file)
+                    }, 500)
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        if (::fileObserver.isInitialized) {
+            fileObserver.stopWatching()
+        }
+        super.onDestroy()
+    }
+}
+package com.example.mediarecovery.utils
+
+import android.os.Build
+import android.os.Environment
+import java.io.File
+
+object FileUtils {
+    fun getWhatsAppCacheDirs(): List<File> {
+        val dirs = mutableListOf<File>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Scoped storage - akses ke Android/data butuh izin MANAGE_EXTERNAL_STORAGE
+            dirs.add(File(Environment.getExternalStorageDirectory(), "Android/data/com.whatsapp/cache"))
+        } else {
+            dirs.add(File(Environment.getExternalStorageDirectory(), "Android/data/com.whatsapp/cache"))
+            // Versi lama mungkin menggunakan folder tersembunyi di root storage
+            dirs.add(File(Environment.getExternalStorageDirectory(), ".WhatsApp"))
+        }
+        return dirs
+    }
+}
